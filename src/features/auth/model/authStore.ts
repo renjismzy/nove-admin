@@ -10,6 +10,7 @@
  */
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import axios from 'axios';
 import { login, getMe, logout as logoutApi } from '../api/api';
 import { authService } from '../api/service';
 import type { LoginRequest, User } from './types';
@@ -71,11 +72,19 @@ export const useAuthStore = create<AuthState>()(
         try {
           await logoutApi();
         } catch (error) {
+          // 仅当后端已明确拒绝会话（401：凭证被拒，且拦截器已先尝试
+          // 刷新并重试）时才继续本地清理。其余失败——网络层无响应、
+          // 网关 5xx（502/504 时后端可能根本没收到请求）、403 等——
+          // 均不代表撤销已执行，向上抛出由调用方提示重试（撤销幂等）。
+          const sessionRejectedByBackend =
+            axios.isAxiosError(error) && error.response?.status === 401;
+          if (!sessionRejectedByBackend) {
+            throw error;
+          }
           console.error('Logout error:', error);
-        } finally {
-          authService.removeToken();
-          set({ user: null, isAuthenticated: false });
         }
+        authService.clear();
+        set({ user: null, isAuthenticated: false });
       },
 
       checkPermission: (permission: string) => {
