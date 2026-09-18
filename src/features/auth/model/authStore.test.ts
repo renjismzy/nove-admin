@@ -16,6 +16,14 @@ vi.mock('../api/api', () => ({
 import { authService } from '../api/service';
 import { useAuthStore } from './authStore';
 
+function axiosError(options: { code?: string; status?: number }) {
+  return {
+    isAxiosError: true,
+    code: options.code,
+    response: options.status === undefined ? undefined : { status: options.status },
+  };
+}
+
 const mockUser: User = {
   id: 'user-1',
   email: 'test@proflu.cn',
@@ -33,6 +41,7 @@ describe('useAuthStore', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     localStorage.clear();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
     useAuthStore.setState({
       isAuthenticated: false,
       user: null,
@@ -42,6 +51,7 @@ describe('useAuthStore', () => {
 
   afterEach(() => {
     localStorage.clear();
+    vi.restoreAllMocks();
   });
 
   describe('initialize', () => {
@@ -147,6 +157,48 @@ describe('useAuthStore', () => {
       expect(state.isAuthenticated).toBe(false);
       expect(state.user).toBeNull();
     });
+
+    it.each(['ERR_NETWORK', 'ECONNABORTED', 'ETIMEDOUT'])(
+      're-throws %s and keeps the local session so the user can retry',
+      async (code) => {
+        authService.setToken('active-token');
+        useAuthStore.setState({ isAuthenticated: true, user: mockUser });
+        apiMocks.logout.mockRejectedValueOnce(axiosError({ code }));
+
+        await expect(useAuthStore.getState().logout()).rejects.toMatchObject({ code });
+
+        expect(authService.getToken()).toBe('active-token');
+        const state = useAuthStore.getState();
+        expect(state.isAuthenticated).toBe(true);
+        expect(state.user).toEqual(mockUser);
+      }
+    );
+
+    it('re-throws a request that never got a response (offline / DNS / CORS)', async () => {
+      authService.setToken('active-token');
+      useAuthStore.setState({ isAuthenticated: true, user: mockUser });
+      apiMocks.logout.mockRejectedValueOnce(axiosError({}));
+
+      await expect(useAuthStore.getState().logout()).rejects.toMatchObject({ isAxiosError: true });
+
+      expect(authService.getToken()).toBe('active-token');
+    });
+
+    it.each([302, 304, 400, 403, 429, 500])(
+      'swallows HTTP %i and still logs out locally',
+      async (status) => {
+        authService.setToken('active-token');
+        useAuthStore.setState({ isAuthenticated: true, user: mockUser });
+        apiMocks.logout.mockRejectedValueOnce(axiosError({ status }));
+
+        await expect(useAuthStore.getState().logout()).resolves.toBeUndefined();
+
+        expect(authService.getToken()).toBeNull();
+        const state = useAuthStore.getState();
+        expect(state.isAuthenticated).toBe(false);
+        expect(state.user).toBeNull();
+      }
+    );
   });
 
   describe('setUser', () => {
